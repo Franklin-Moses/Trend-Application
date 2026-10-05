@@ -10,7 +10,6 @@ yarn-error.log*
 !.env.example
 
 # Build output
-dist/
 
 # Terraform
 .terraform/
