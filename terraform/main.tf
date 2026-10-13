@@ -1,5 +1,7 @@
 resource "aws_vpc" "trend_vpc" {
-  cidr_block = "10.0.0.0/16"
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
 
   tags = {
     Name = "trend-vpc"
@@ -103,6 +105,24 @@ resource "aws_security_group" "trend_ec2_sg" {
     cidr_blocks = [var.admin_cidr]
   }
 
+  # GitHub webhooks - allow GitHub IPv4 ranges to reach Jenkins
+  ingress {
+    description = "GitHub webhooks"
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+
+    cidr_blocks = [
+      "9.234.106.48/28",
+      "9.234.98.160/28",
+      "9.234.98.176/28",
+      "192.30.252.0/22",
+      "185.199.108.0/22",
+      "140.82.112.0/20",
+      "143.55.64.0/20",
+    ]
+  }
+
   # HTTP - public
   ingress {
     description = "HTTP"
@@ -152,11 +172,20 @@ resource "aws_eks_cluster" "trend_eks" {
   name     = "trend-eks"
   role_arn = aws_iam_role.trend_eks_cluster_role.arn
 
+  access_config {
+    authentication_mode = "API_AND_CONFIG_MAP"
+  }
+
   vpc_config {
     subnet_ids = [
       aws_subnet.trend_eks_subnet_b.id,
       aws_subnet.trend_eks_subnet_c.id
     ]
+
+    endpoint_public_access  = true
+    endpoint_private_access = true
+    public_access_cidrs     = [var.admin_cidr]
+
   }
 
   depends_on = [
@@ -234,6 +263,16 @@ resource "aws_instance" "trend_ec2" {
 
   apt-get update -y
   apt-get install -y jenkins
+
+  apt-get install -y unzip curl
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
+  unzip -q /tmp/awscliv2.zip -d /tmp
+  /tmp/aws/install
+  rm -rf /tmp/aws /tmp/awscliv2.zip
+
+  curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl"
+  chmod +x /usr/local/bin/kubectl
+
 
   # Allow Jenkins to use Docker
   usermod -aG docker jenkins
@@ -374,7 +413,49 @@ resource "aws_iam_role_policy" "trend_ec2_eks_access" {
           "eks:DescribeCluster"
         ]
         Resource = aws_eks_cluster.trend_eks.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload",
+          "ecr:PutImage",
+          "ecr:BatchGetImage"
+        ]
+        Resource = "arn:aws:ecr:ap-south-1:074478994008:repository/trend-application"
       }
     ]
   })
+}
+
+# Allow the Jenkins EC2 role to authenticate to EKS
+resource "aws_eks_access_entry" "jenkins" {
+  cluster_name  = aws_eks_cluster.trend_eks.name
+  principal_arn = aws_iam_role.trend_ec2_role.arn
+  type          = "STANDARD"
+}
+
+# Allow Jenkins to manage application resources in the default namespace
+resource "aws_eks_access_policy_association" "jenkins_edit" {
+  cluster_name  = aws_eks_cluster.trend_eks.name
+  principal_arn = aws_iam_role.trend_ec2_role.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
+
+  access_scope {
+    type       = "namespace"
+    namespaces = ["default"]
+  }
+
+  depends_on = [
+    aws_eks_access_entry.jenkins
+  ]
 }
